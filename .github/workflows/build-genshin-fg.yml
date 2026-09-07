@@ -1,4 +1,4 @@
-name: Build OptiScaler Nukem Provider
+name: Extract Official Nukem DLL
 
 on:
   push:
@@ -6,66 +6,43 @@ on:
       - genshin-fg-build
   workflow_dispatch:
 
-env:
-  VCPKG_DEFAULT_TRIPLET: x64-windows-static
-
 permissions:
   contents: read
 
 jobs:
-  build:
+  extract:
     runs-on: windows-latest
     steps:
-      - name: Clone upstream Reforged with submodules
+      - name: Download official OptiScaler v0.9.4 package
         shell: pwsh
         run: |
-          git clone --recursive https://github.com/RespectMathias/dlssg_to_fsr.git src
+          $url = 'https://github.com/optiscaler/OptiScaler/releases/download/v0.9.4/Optiscaler_0.9.4-final.20260718._MM.7z'
+          Invoke-WebRequest -Uri $url -OutFile optiscaler.7z
+          $hash = (Get-FileHash optiscaler.7z -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad') {
+            throw "Unexpected OptiScaler package hash: $hash"
+          }
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v5
-
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgGitCommitId: c93f37f1b1d20963ceab60bcd78b946af902ffe9
-
-      - name: Configure
+      - name: Extract Nukem provider
         shell: pwsh
         run: |
-          Set-Location src
-          cmake --preset test
-
-      - name: Build
-        shell: pwsh
-        run: |
-          Set-Location src
-          cmake --build --preset test-release
-
-      - name: Find and package provider DLL
-        shell: pwsh
-        run: |
-          $dll = Get-ChildItem -Path src -Recurse -Filter dlssg_to_fsr.dll -File | Select-Object -First 1
-          if (-not $dll) { throw 'dlssg_to_fsr.dll not found after build' }
+          & 7z x optiscaler.7z -oextracted -y | Out-Null
+          $dll = Get-ChildItem -Path extracted -Recurse -Filter dlssg_to_fsr3_amd_is_better.dll -File | Select-Object -First 1
+          if (-not $dll) { throw 'dlssg_to_fsr3_amd_is_better.dll not found in official OptiScaler package' }
           New-Item -ItemType Directory -Force package | Out-Null
           Copy-Item $dll.FullName package/dlssg_to_fsr3_amd_is_better.dll -Force
-          $ffx = Get-ChildItem -Path src -Recurse -Filter amd_fidelityfx_dx12.dll -File | Select-Object -First 1
-          if ($ffx) { Copy-Item $ffx.FullName package/amd_fidelityfx_dx12.dll -Force }
+          $dllHash = (Get-FileHash package/dlssg_to_fsr3_amd_is_better.dll -Algorithm SHA256).Hash.ToLower()
+          "SHA256=$dllHash" | Set-Content package/SHA256.txt -Encoding ascii
           @'
-          OptiScaler frame-generation provider build.
-          Source: RespectMathias/dlssg_to_fsr (continuation of Nukem9/dlssg-to-fsr3)
-          The core DLL was renamed to dlssg_to_fsr3_amd_is_better.dll because OptiScaler expects this legacy filename.
-          Place the DLL beside OptiScaler's frame-generation runtime DLLs.
-          '@ | Set-Content -Encoding UTF8 package/README.txt
-          Compress-Archive -Path package/* -DestinationPath dlssg_to_fsr3_OptiScaler.zip -Force
+          dlssg_to_fsr3_amd_is_better.dll
+          Extracted from the official OptiScaler v0.9.4 GitHub release package.
+          That release explicitly bundles Nukem's dlssg_to_fsr3 v0.130.
+          '@ | Set-Content package/README.txt -Encoding UTF8
+          Compress-Archive -Path package/* -DestinationPath dlssg_to_fsr3_amd_is_better.zip -Force
 
-      - name: Upload ZIP
+      - name: Upload DLL ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: dlssg_to_fsr3_OptiScaler
-          path: dlssg_to_fsr3_OptiScaler.zip
+          name: dlssg_to_fsr3_amd_is_better
+          path: dlssg_to_fsr3_amd_is_better.zip
           if-no-files-found: error
