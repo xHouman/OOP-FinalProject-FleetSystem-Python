@@ -1,4 +1,4 @@
-name: Extract Official Nukem DLL
+name: Build Patched OptiScaler 0822 for Genshin FSR FG
 
 on:
   push:
@@ -10,39 +10,245 @@ permissions:
   contents: read
 
 jobs:
-  extract:
+  build:
     runs-on: windows-latest
     steps:
-      - name: Download official OptiScaler v0.9.4 package
+      - name: Clone exact OptiScaler 2026-08-22 source
         shell: pwsh
         run: |
-          $url = 'https://github.com/optiscaler/OptiScaler/releases/download/v0.9.4/Optiscaler_0.9.4-final.20260718._MM.7z'
-          Invoke-WebRequest -Uri $url -OutFile optiscaler.7z
-          $hash = (Get-FileHash optiscaler.7z -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne '575cb4df866116093df75af607e37fd70e10f5163e0f23fd5c804142e80ef0ad') {
-            throw "Unexpected OptiScaler package hash: $hash"
+          git clone https://github.com/optiscaler/OptiScaler.git opti
+          Set-Location opti
+          git checkout 0f15408a
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          Write-Host "OptiScaler commit: $(git rev-parse HEAD)"
+          $ffx = git -C external/FidelityFX-SDK-v2 rev-parse HEAD
+          Write-Host "FidelityFX-SDK-v2 commit: $ffx"
+          if ((git rev-parse HEAD) -notlike '0f15408a*') { throw 'Wrong OptiScaler commit checked out' }
+          if ($ffx -ne '60f4ea81909200d8542eca14dccb2628b763a9a3') { throw "Unexpected FidelityFX-SDK-v2 commit: $ffx" }
+
+      - name: Apply conservative DX11-to-DX12 FG swapchain compatibility patch
+        shell: pwsh
+        run: |
+          $path = Join-Path $PWD 'opti\OptiScaler\hooks\DxgiFactory_Hooks.cpp'
+          $text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n")
+
+          $old = @'
+static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
+{
+    if (desc.SampleDesc.Count > 1)
+    {
+        LOG_ERROR("Dx11wDx12 interop does not support MSAA swapchains!");
+        return false;
+    }
+
+    if (desc.BufferCount < 2)
+        desc.BufferCount = 2;
+
+    if (desc.SwapEffect == DXGI_SWAP_EFFECT_DISCARD)
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    else if (desc.SwapEffect == DXGI_SWAP_EFFECT_SEQUENTIAL)
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    return true;
+}
+'@
+
+          $new = @'
+static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
+{
+    // Genshin DX11 -> DX12 FG compatibility path.
+    // The visible DX12 swapchain is an interop/presentation swapchain, so normalize
+    // the DX11 descriptor to a conservative flip-model descriptor accepted by D3D12.
+    LOG_INFO("GenshinFGCompat original desc: {}x{}, fmt={}, buffers={}, usage={:X}, flags={:X}, swap={}, scaling={}, alpha={}, stereo={}, sample={}/{}",
+             desc.Width, desc.Height, (UINT) desc.Format, desc.BufferCount, desc.BufferUsage, desc.Flags,
+             (UINT) desc.SwapEffect, (UINT) desc.Scaling, (UINT) desc.AlphaMode, desc.Stereo,
+             desc.SampleDesc.Count, desc.SampleDesc.Quality);
+
+    if (desc.SampleDesc.Count > 1)
+        LOG_WARN("GenshinFGCompat: converting MSAA swapchain to non-MSAA for DX12 interop");
+
+    if (desc.BufferCount < 2)
+        desc.BufferCount = 2;
+
+    // D3D12 HWND swapchains use flip model. FLIP_DISCARD is the least restrictive
+    // choice for this interop presentation chain.
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Stereo = FALSE;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+
+    // Keep only the waitable-object flag if the game requested it. Other DX11-era
+    // flags (mode switch, GDI, protected/video/display-only, etc.) can make a D3D12
+    // flip-model CreateSwapChainForHwnd call fail with DXGI_ERROR_INVALID_CALL.
+    desc.Flags &= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    // Flip-model swapchains do not accept sRGB/typeless back-buffer formats. Map
+    // them to the resource-compatible non-sRGB format used for presentation.
+    switch (desc.Format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        break;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        break;
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        break;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
+        break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        break;
+    default:
+        break;
+    }
+
+    LOG_INFO("GenshinFGCompat sanitized desc: {}x{}, fmt={}, buffers={}, usage={:X}, flags={:X}, swap={}, scaling={}, alpha={}, stereo={}, sample={}/{}",
+             desc.Width, desc.Height, (UINT) desc.Format, desc.BufferCount, desc.BufferUsage, desc.Flags,
+             (UINT) desc.SwapEffect, (UINT) desc.Scaling, (UINT) desc.AlphaMode, desc.Stereo,
+             desc.SampleDesc.Count, desc.SampleDesc.Quality);
+    return true;
+}
+'@
+
+          if (-not $text.Contains($old)) { throw 'Expected PrepareDx12InteropDesc1 block was not found in 0822 source' }
+          $text = $text.Replace($old, $new)
+
+          $needle = @'
+                    if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc))
+                    {
+                        {
+'@
+          $insert = @'
+                    if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc))
+                    {
+                        // Resolve zero-sized descriptors before handing the visible interop chain to D3D12.
+                        if (fgDesc.Width == 0 || fgDesc.Height == 0)
+                        {
+                            RECT clientRect {};
+                            if (GetClientRect(hWnd, &clientRect))
+                            {
+                                if (fgDesc.Width == 0)
+                                    fgDesc.Width = static_cast<UINT>(clientRect.right - clientRect.left);
+                                if (fgDesc.Height == 0)
+                                    fgDesc.Height = static_cast<UINT>(clientRect.bottom - clientRect.top);
+                            }
+                        }
+
+                        LOG_INFO("GenshinFGCompat creating windowed DX12 FG interop swapchain: {}x{}, fmt={}, buffers={}, flags={:X}",
+                                 fgDesc.Width, fgDesc.Height, (UINT) fgDesc.Format, fgDesc.BufferCount, fgDesc.Flags);
+                        {
+'@
+          if (-not $text.Contains($needle)) { throw 'Expected DX11 interop block was not found' }
+          $text = $text.Replace($needle, $insert)
+
+          $oldFgCall = @'
+                            fgScResult = FGHooks::CreateSwapChainForHwnd(
+                                realFactory, dx12Queue, hWnd, &fgDesc,
+                                pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
+                                &fgSwapChain1);
+'@
+          $newFgCall = @'
+                            // The helper DX12 presentation chain must stay windowed/borderless.
+                            // Passing the game's DX11 fullscreen descriptor here can make DXGI reject
+                            // an otherwise valid D3D12 flip-model descriptor.
+                            fgScResult = FGHooks::CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc,
+                                                                        nullptr, pRestrictToOutput, &fgSwapChain1);
+'@
+          if (-not $text.Contains($oldFgCall)) { throw 'Expected FGHooks interop call was not found' }
+          $text = $text.Replace($oldFgCall, $newFgCall)
+
+          $oldFallback = @'
+                            fgScResult =
+                                o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc,
+                                                         pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
+                                                         pRestrictToOutput, &fgSwapChain1);
+'@
+          $newFallback = @'
+                            fgScResult = o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,
+                                                                  pRestrictToOutput, &fgSwapChain1);
+'@
+          if (-not $text.Contains($oldFallback)) { throw 'Expected plain DX12 fallback call was not found' }
+          $text = $text.Replace($oldFallback, $newFallback)
+
+          [IO.File]::WriteAllText($path, $text.Replace("`n", "`r`n"), [Text.UTF8Encoding]::new($false))
+          Set-Location opti
+          git diff --check
+          git diff -- OptiScaler/hooks/DxgiFactory_Hooks.cpp
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build patched 0822 Release
+        shell: pwsh
+        working-directory: opti
+        run: |
+          msbuild /m /p:Configuration=Release . /verbosity:minimal
+
+      - name: Validate and package the complete matching runtime
+        shell: pwsh
+        run: |
+          $src = Join-Path $PWD 'opti\x64\Release\a\OptiScaler'
+          if (-not (Test-Path $src)) { throw "OptiScaler package directory not found: $src" }
+
+          $required = @(
+            'OptiScaler.dll',
+            'OptiScaler.ini',
+            'amd_fidelityfx_loader_dx12.dll',
+            'amd_fidelityfx_upscaler_dx12.dll',
+            'amd_fidelityfx_framegeneration_dx12.dll'
+          )
+          foreach ($name in $required) {
+            if (-not (Test-Path (Join-Path $src $name))) { throw "Missing required runtime file: $name" }
           }
 
-      - name: Extract Nukem provider
-        shell: pwsh
-        run: |
-          & 7z x optiscaler.7z -oextracted -y | Out-Null
-          $dll = Get-ChildItem -Path extracted -Recurse -Filter dlssg_to_fsr3_amd_is_better.dll -File | Select-Object -First 1
-          if (-not $dll) { throw 'dlssg_to_fsr3_amd_is_better.dll not found in official OptiScaler package' }
           New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item $dll.FullName package/dlssg_to_fsr3_amd_is_better.dll -Force
-          $dllHash = (Get-FileHash package/dlssg_to_fsr3_amd_is_better.dll -Algorithm SHA256).Hash.ToLower()
-          "SHA256=$dllHash" | Set-Content package/SHA256.txt -Encoding ascii
-          @'
-          dlssg_to_fsr3_amd_is_better.dll
-          Extracted from the official OptiScaler v0.9.4 GitHub release package.
-          That release explicitly bundles Nukem's dlssg_to_fsr3 v0.130.
-          '@ | Set-Content package/README.txt -Encoding UTF8
-          Compress-Archive -Path package/* -DestinationPath dlssg_to_fsr3_amd_is_better.zip -Force
+          Copy-Item (Join-Path $src '*') package -Recurse -Force
 
-      - name: Upload DLL ZIP
+          @'
+          OptiScaler 2026-08-22 (commit 0f15408a) - Genshin DX11 -> DX12 FSR FG compatibility build
+
+          Patch scope:
+          - Keeps the upstream 0822 codebase and exact upstream submodules.
+          - Packages the matching FidelityFX runtime produced by that exact source tree.
+          - Normalizes only the DX11->DX12 interop presentation descriptor to a conservative D3D12 flip-model descriptor.
+          - Forces the helper DX12 FG swapchain to windowed/borderless mode.
+          - Adds GenshinFGCompat INFO logs showing original/sanitized descriptors.
+
+          Intended test configuration:
+          FG Input  = OptiFG (Upscaler)
+          FG Output = FSR FG
+
+          This is an experimental third-party game injection build. Back up your existing OptiScaler folder before testing.
+          '@ | Set-Content package\GENSHIN_FG_COMPAT_README.txt -Encoding UTF8
+
+          $dllHash = (Get-FileHash package\OptiScaler.dll -Algorithm SHA256).Hash.ToLower()
+          $fgHash = (Get-FileHash package\amd_fidelityfx_framegeneration_dx12.dll -Algorithm SHA256).Hash.ToLower()
+          @(
+            "OptiScaler.dll SHA256=$dllHash",
+            "amd_fidelityfx_framegeneration_dx12.dll SHA256=$fgHash",
+            "OptiScaler source=0f15408a",
+            "FidelityFX-SDK-v2 source=60f4ea81909200d8542eca14dccb2628b763a9a3"
+          ) | Set-Content package\BUILD_HASHES.txt -Encoding ascii
+
+          Compress-Archive -Path package\* -DestinationPath OptiScaler_0822_Genshin_FSRFG_Compat.zip -Force
+
+      - name: Upload patched full package
         uses: actions/upload-artifact@v4
         with:
-          name: dlssg_to_fsr3_amd_is_better
-          path: dlssg_to_fsr3_amd_is_better.zip
+          name: OptiScaler_0822_Genshin_FSRFG_Compat
+          path: OptiScaler_0822_Genshin_FSRFG_Compat.zip
           if-no-files-found: error
+          retention-days: 7
