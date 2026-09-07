@@ -16,17 +16,44 @@ jobs:
       - name: Clone upstream frame-generation branch
         shell: pwsh
         run: |
-          git clone --branch frame-generation --single-branch --recurse-submodules https://github.com/AizawaHikaru233/genshin_fsr_brigde.git src
+          git clone --branch frame-generation --single-branch https://github.com/AizawaHikaru233/genshin_fsr_brigde.git src
 
-      - name: Build Lite package
+      - name: Configure FG bridge
         shell: pwsh
         run: |
-          Set-Location src
-          ./Build-Package.ps1 -Configuration Release
+          cmake -S src -B src/build-fg -A x64 -DDX11FSRBRIDGE_RELEASE_RUNTIME=ON -DDX11FSRBRIDGE_ENABLE_FSR2_TRANSLATION_EXPERIMENTAL=ON
 
-      - name: Upload Lite package
+      - name: Build FG bridge
+        shell: pwsh
+        run: |
+          cmake --build src/build-fg --config Release
+
+      - name: Package ready-to-drop Bridge folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package/Bridge | Out-Null
+          Copy-Item src/build-fg/Release/Dx11FsrBridge.dll package/Bridge/Dx11FsrBridge.dll -Force
+          Copy-Item src/Dx11FsrBridge.release.ini package/Bridge/Dx11FsrBridge.ini -Force
+          @'
+          Genshin FSR Bridge - frame-generation build
+
+          Replace your existing:
+          GenshinFSRBridge_v2.2.0\payload\Bridge\
+          with the included Bridge folder (backup your old folder first).
+
+          Built from upstream branch: frame-generation
+          Repository: AizawaHikaru233/genshin_fsr_brigde
+          Build flags:
+          DX11FSRBRIDGE_RELEASE_RUNTIME=ON
+          DX11FSRBRIDGE_ENABLE_FSR2_TRANSLATION_EXPERIMENTAL=ON
+
+          Keep your existing OptiScaler 0.10.0 nightly 20260815 setup.
+          '@ | Set-Content -Encoding UTF8 package/README.txt
+          Compress-Archive -Path package/* -DestinationPath GenshinFSRBridge-FG-ready.zip -Force
+
+      - name: Upload ready ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: GenshinOneClick-Lite-FG
-          path: src/dist/*.zip
+          name: GenshinFSRBridge-FG-ready
+          path: GenshinFSRBridge-FG-ready.zip
           if-no-files-found: error
