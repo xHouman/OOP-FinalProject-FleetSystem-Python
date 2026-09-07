@@ -53,21 +53,45 @@ jobs:
       - name: Validate and package complete matching runtime
         shell: pwsh
         run: |
-          $src = Join-Path $PWD 'opti\x64\Release\a\OptiScaler'
-          if (-not (Test-Path $src)) { throw "OptiScaler package directory not found: $src" }
-          $required = @('OptiScaler.dll','OptiScaler.ini','amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_upscaler_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll')
-          foreach ($name in $required) {
-            if (-not (Test-Path (Join-Path $src $name))) { throw "Missing required runtime file: $name" }
-          }
+          $out = Join-Path $PWD 'opti\x64\Release\a'
+          $runtime = Join-Path $out 'OptiScaler'
+          if (-not (Test-Path $out)) { throw "Build output directory not found: $out" }
+          if (-not (Test-Path $runtime)) { throw "Runtime directory not found: $runtime" }
+
           New-Item -ItemType Directory -Force package | Out-Null
-          Copy-Item (Join-Path $src '*') package -Recurse -Force
+
+          # The upstream post-build layout puts OptiScaler.dll/ini at a\ and runtime
+          # libraries under a\OptiScaler\. The Genshin bridge manager expects a flat
+          # module directory, so flatten those two layers while preserving nested dirs.
+          Copy-Item (Join-Path $out 'OptiScaler.dll') package\OptiScaler.dll -Force
+          Copy-Item (Join-Path $out 'OptiScaler.ini') package\OptiScaler.ini -Force
+          Copy-Item (Join-Path $runtime '*') package -Recurse -Force
+
+          if (Test-Path (Join-Path $out 'Licenses')) {
+            New-Item -ItemType Directory -Force package\Licenses | Out-Null
+            Copy-Item (Join-Path $out 'Licenses\*') package\Licenses -Recurse -Force
+          }
+
+          $required = @(
+            'OptiScaler.dll',
+            'OptiScaler.ini',
+            'amd_fidelityfx_loader_dx12.dll',
+            'amd_fidelityfx_upscaler_dx12.dll',
+            'amd_fidelityfx_framegeneration_dx12.dll'
+          )
+          foreach ($name in $required) {
+            if (-not (Test-Path (Join-Path 'package' $name))) { throw "Missing required runtime file after flattening: $name" }
+          }
+
           @(
             'OptiScaler 2026-08-22 commit 0f15408a - Genshin DX11 -> DX12 FSR FG compatibility build',
             '',
             'Use: FG Input = OptiFG (Upscaler), FG Output = FSR FG',
-            'This package includes the matching FidelityFX runtime from the exact upstream 0822 source tree.',
+            'The package is flattened for the Genshin FSR Bridge manual installer.',
+            'It includes FidelityFX runtime files from the exact upstream 0822 source tree.',
             'Back up your current OptiScaler folder before testing.'
           ) | Set-Content package\GENSHIN_FG_COMPAT_README.txt -Encoding UTF8
+
           $dllHash = (Get-FileHash package\OptiScaler.dll -Algorithm SHA256).Hash.ToLower()
           $fgHash = (Get-FileHash package\amd_fidelityfx_framegeneration_dx12.dll -Algorithm SHA256).Hash.ToLower()
           @(
@@ -76,6 +100,9 @@ jobs:
             'OptiScaler source=0f15408a',
             'FidelityFX-SDK-v2 source=60f4ea81909200d8542eca14dccb2628b763a9a3'
           ) | Set-Content package\BUILD_HASHES.txt -Encoding ascii
+
+          Write-Host 'Final package top level:'
+          Get-ChildItem package | Select-Object Name,Length
           Compress-Archive -Path package\* -DestinationPath OptiScaler_0822_Genshin_FSRFG_Compat.zip -Force
 
       - name: Upload patched full package
