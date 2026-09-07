@@ -7,9 +7,14 @@ $ErrorActionPreference = 'Stop'
 $path = Join-Path $OptiRoot 'OptiScaler\hooks\DxgiFactory_Hooks.cpp'
 if (-not (Test-Path $path)) { throw "Source file not found: $path" }
 
-$text = [IO.File]::ReadAllText($path).Replace("`r`n", "`n")
+function Normalize-LF([string]$s) {
+    if ($null -eq $s) { return $s }
+    return $s.Replace("`r`n", "`n")
+}
 
-$old = @'
+$text = Normalize-LF ([IO.File]::ReadAllText($path))
+
+$old = Normalize-LF @'
 static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
 {
     if (desc.SampleDesc.Count > 1)
@@ -32,7 +37,7 @@ static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
 }
 '@
 
-$new = @'
+$new = Normalize-LF @'
 static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
 {
     // Genshin DX11 -> DX12 FG compatibility path.
@@ -49,8 +54,8 @@ static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
     if (desc.BufferCount < 2)
         desc.BufferCount = 2;
 
-    // D3D12 HWND swapchains use flip model. FLIP_DISCARD is the least restrictive
-    // choice for this interop presentation chain.
+    // D3D12 HWND swapchains require flip model. FLIP_DISCARD is the least restrictive
+    // choice for this helper interop presentation chain.
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
@@ -59,12 +64,11 @@ static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
     desc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 
-    // Keep only the waitable-object flag if the game requested it. Other DX11-era
-    // flags can make a D3D12 flip-model CreateSwapChainForHwnd call fail.
+    // Keep only the waitable-object flag when the game requested it. DX11-era flags
+    // such as ALLOW_MODE_SWITCH or GDI_COMPATIBLE can make the helper DX12 flip chain invalid.
     desc.Flags &= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
-    // Flip-model swapchains do not accept sRGB/typeless back-buffer formats. Map
-    // them to resource-compatible non-sRGB presentation formats.
+    // Flip-model swapchains do not accept sRGB/typeless back-buffer formats.
     switch (desc.Format)
     {
     case DXGI_FORMAT_R8G8B8A8_TYPELESS:
@@ -101,12 +105,12 @@ static bool PrepareDx12InteropDesc1(DXGI_SWAP_CHAIN_DESC1& desc)
 if (-not $text.Contains($old)) { throw 'Expected PrepareDx12InteropDesc1 block was not found in exact 0822 source' }
 $text = $text.Replace($old, $new)
 
-$needle = @'
+$needle = Normalize-LF @'
                     if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc))
                     {
                         {
 '@
-$insert = @'
+$insert = Normalize-LF @'
                     if (realScResult == S_OK && PrepareDx12InteropDesc1(fgDesc))
                     {
                         // Resolve zero-sized descriptors before handing the visible interop chain to D3D12.
@@ -129,13 +133,13 @@ $insert = @'
 if (-not $text.Contains($needle)) { throw 'Expected DX11 interop block was not found' }
 $text = $text.Replace($needle, $insert)
 
-$oldFgCall = @'
+$oldFgCall = Normalize-LF @'
                             fgScResult = FGHooks::CreateSwapChainForHwnd(
                                 realFactory, dx12Queue, hWnd, &fgDesc,
                                 pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr, pRestrictToOutput,
                                 &fgSwapChain1);
 '@
-$newFgCall = @'
+$newFgCall = Normalize-LF @'
                             // The helper DX12 presentation chain must stay windowed/borderless.
                             fgScResult = FGHooks::CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc,
                                                                         nullptr, pRestrictToOutput, &fgSwapChain1);
@@ -143,13 +147,13 @@ $newFgCall = @'
 if (-not $text.Contains($oldFgCall)) { throw 'Expected FGHooks interop call was not found' }
 $text = $text.Replace($oldFgCall, $newFgCall)
 
-$oldFallback = @'
+$oldFallback = Normalize-LF @'
                             fgScResult =
                                 o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc,
                                                          pFullscreenDesc != nullptr ? &localFullscreenDesc : nullptr,
                                                          pRestrictToOutput, &fgSwapChain1);
 '@
-$newFallback = @'
+$newFallback = Normalize-LF @'
                             fgScResult = o_CreateSwapChainForHwnd(realFactory, dx12Queue, hWnd, &fgDesc, nullptr,
                                                                   pRestrictToOutput, &fgSwapChain1);
 '@
