@@ -34,13 +34,13 @@ jobs:
           if ($opti -notlike '0f15408a*') { throw 'Wrong OptiScaler commit checked out' }
           if ($ffx -ne '60f4ea81909200d8542eca14dccb2628b763a9a3') { throw "Unexpected FidelityFX-SDK-v2 commit: $ffx" }
 
-      - name: Apply Genshin DX11-to-DX12 FG compatibility patch
+      - name: Apply Genshin FSR FG v3 compatibility patch
         shell: pwsh
         run: |
-          & .\helper\tools\patch_optiscaler_0822.ps1 -OptiRoot (Resolve-Path .\opti)
+          & .\helper\tools\patch_optiscaler_0822_v3.ps1 -OptiRoot (Resolve-Path .\opti)
           Set-Location opti
           git diff --check
-          git diff -- OptiScaler/hooks/DxgiFactory_Hooks.cpp
+          git diff -- OptiScaler/hooks/DxgiFactory_Hooks.cpp OptiScaler/inputs/NVNGX_DLSS_Dx12.cpp OptiScaler/inputs/FG/Upscaler_Inputs_Dx12.cpp OptiScaler/framegen/ffx/FSRFG_Dx12.cpp OptiScaler.ini
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
@@ -60,9 +60,6 @@ jobs:
 
           New-Item -ItemType Directory -Force package | Out-Null
 
-          # The upstream post-build layout puts OptiScaler.dll/ini at a\ and runtime
-          # libraries under a\OptiScaler\. The Genshin bridge manager expects a flat
-          # module directory, so flatten those two layers while preserving nested dirs.
           Copy-Item (Join-Path $out 'OptiScaler.dll') package\OptiScaler.dll -Force
           Copy-Item (Join-Path $out 'OptiScaler.ini') package\OptiScaler.ini -Force
           Copy-Item (Join-Path $runtime '*') package -Recurse -Force
@@ -84,11 +81,13 @@ jobs:
           }
 
           @(
-            'OptiScaler 2026-08-22 commit 0f15408a - Genshin DX11 -> DX12 FSR FG compatibility build',
+            'OptiScaler 2026-08-22 commit 0f15408a - Genshin FSR FG compatibility v3',
             '',
-            'Use: FG Input = OptiFG (Upscaler), FG Output = FSR FG',
-            'The package is flattened for the Genshin FSR Bridge manual installer.',
-            'It includes FidelityFX runtime files from the exact upstream 0822 source tree.',
+            'Root-cause change: DX12 UpscaleEnd/HUDless capture is moved AFTER current-frame upscaler Evaluate.',
+            'Current NGX output is then copied directly as FSR-FG HudlessColor on the same D3D12 command list.',
+            'Heuristic HUDFix is OFF. ResourceFlip is OFF. DepthScale is OFF.',
+            'Use: FG Input = OptiFG (Upscaler), FG Output = FSR FG.',
+            'No FPS limiter is enabled by this package; FG swapchain V-Sync remains enabled.',
             'Back up your current OptiScaler folder before testing.'
           ) | Set-Content package\GENSHIN_FG_COMPAT_README.txt -Encoding UTF8
 
@@ -98,17 +97,18 @@ jobs:
             "OptiScaler.dll SHA256=$dllHash",
             "amd_fidelityfx_framegeneration_dx12.dll SHA256=$fgHash",
             'OptiScaler source=0f15408a',
-            'FidelityFX-SDK-v2 source=60f4ea81909200d8542eca14dccb2628b763a9a3'
+            'FidelityFX-SDK-v2 source=60f4ea81909200d8542eca14dccb2628b763a9a3',
+            'compat_patch=v3-current-frame-hudless'
           ) | Set-Content package\BUILD_HASHES.txt -Encoding ascii
 
           Write-Host 'Final package top level:'
           Get-ChildItem package | Select-Object Name,Length
-          Compress-Archive -Path package\* -DestinationPath OptiScaler_0822_Genshin_FSRFG_Compat.zip -Force
+          Compress-Archive -Path package\* -DestinationPath OptiScaler_0822_Genshin_FSRFG_Compat_v3.zip -Force
 
       - name: Upload patched full package
         uses: actions/upload-artifact@v4
         with:
-          name: OptiScaler_0822_Genshin_FSRFG_Compat
-          path: OptiScaler_0822_Genshin_FSRFG_Compat.zip
+          name: OptiScaler_0822_Genshin_FSRFG_Compat_v3
+          path: OptiScaler_0822_Genshin_FSRFG_Compat_v3.zip
           if-no-files-found: error
           retention-days: 7
